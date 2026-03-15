@@ -115,7 +115,10 @@ ATOM14: Dict[str, Tuple[str, ...]] = {
 def load_structure(file_path: str) -> Structure:
     """Loads a PDB or CIF file and returns a Biopython Structure object."""
     structure_id = os.path.basename(file_path).split(".")[0]
-    parser = PDB.PDBParser(QUIET=True)
+    if file_path.endswith(".cif"):
+        parser = PDB.MMCIFParser(QUIET=True)
+    else:
+        parser = PDB.PDBParser(QUIET=True)
     structure = parser.get_structure(structure_id, file_path)
     return structure
 
@@ -351,7 +354,7 @@ def process_pdb_folder(
     # Prepare list of arguments for the pool
     processing_args = []
     for filename in os.listdir(pdb_folder):
-        if filename.endswith(".pdb"):
+        if filename.endswith(".pdb") or filename.endswith(".cif"):
             input_path = os.path.join(pdb_folder, filename)
             output_path = os.path.join(
                 output_folder, f"{os.path.splitext(filename)[0]}.h5"

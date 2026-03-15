@@ -1,6 +1,6 @@
 from Bio import PDB
 from Bio.PDB import Structure, Model
-from Bio.PDB import PDBParser, MMCIFIO
+from Bio.PDB import PDBParser, MMCIFParser, MMCIFIO
 import os
 import pandas as pd
 from tqdm import tqdm
@@ -117,7 +117,10 @@ def process_single_pdb(args):
     """
     input_pdb, output_dir_cif = args
     try:
-        parser = PDB.PDBParser(QUIET=True)
+        if input_pdb.endswith(".cif"):
+            parser = MMCIFParser(QUIET=True)
+        else:
+            parser = PDBParser(QUIET=True)
         structure = parser.get_structure("structure", input_pdb)
         base_name = os.path.splitext(os.path.basename(input_pdb))[0]
 
@@ -248,8 +251,8 @@ def get_seq_main():
     print(f"CIF Output Directory: {args.output_dir_cif}")
     print(f"JSON Output Directory: {args.output_dir_json}")
 
-    # Phase 1: Parallel PDB Processing (Extract sequences and split chains)
-    pdb_files = list(Path(args.input_dir).glob("*.pdb"))
+    # Phase 1: Parallel PDB/CIF Processing (Extract sequences and split chains)
+    pdb_files = list(Path(args.input_dir).glob("*.pdb")) + list(Path(args.input_dir).glob("*.cif"))
     process_args = [(str(f), args.output_dir_cif) for f in pdb_files]
 
     sequences_dict = {}
@@ -346,8 +349,18 @@ def get_seq_main():
         for _, r in sub.iterrows():
             cid = r["complex"]
             # Create symbolic links to save space while organizing files into batch folders
+            for ext in [".pdb", ".cif"]:
+                src = os.path.join(args.input_dir, f"{cid}{ext}")
+                if os.path.exists(src):
+                    dest_path = os.path.join(
+                        bd_pdb, os.path.basename(src)
+                    )
+                    if not os.path.exists(dest_path):
+                        os.symlink(
+                            os.path.abspath(src), dest_path
+                        )
+
             for ext, src_dir, dest_dir in [
-                (".pdb", args.input_dir, bd_pdb),
                 (".json", args.output_dir_json, bd_json),
             ]:
                 src = os.path.join(src_dir, f"{cid}{ext}")

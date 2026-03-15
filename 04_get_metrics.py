@@ -23,7 +23,11 @@ def get_chains_from_pdb(pdb_path):
     Returns:
         list: Sorted list of unique chain identifiers.
     """
-    parser = PDBParser(QUIET=True)
+    if str(pdb_path).endswith('.cif'):
+        from Bio.PDB import MMCIFParser
+        parser = MMCIFParser(QUIET=True)
+    else:
+        parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", pdb_path)
     model = structure[0]  # Defaulting to the first model in the structure
     chains = [chain.id for chain in model.get_chains()]
@@ -33,61 +37,37 @@ def get_chains_from_pdb(pdb_path):
 def get_interface_res_from_pdb(
     pdb_file, chain1="A", chain2="B", dist_cutoff=10
 ):
-    """
-    Identifies interface residues between two chains based on CA atom distances.
-
-    Args:
-        pdb_file (str): Path to the PDB file.
-        chain1, chain2 (str): Chain IDs to compare.
-        dist_cutoff (int): Distance threshold in Angstroms.
-    Returns:
-        tuple: (list of residues in chain1 interface, list of residues in chain2 interface)
-    """
+    if str(pdb_file).endswith('.cif'):
+        from Bio.PDB import MMCIFParser
+        parser = MMCIFParser(QUIET=True)
+    else:
+        from Bio.PDB import PDBParser
+        parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("structure", pdb_file)
+    model = structure[0]
+    
     chain_coords = defaultdict(dict)
-
-    with open(pdb_file, "r") as f:
-        for line in f:
-            if line.startswith("ATOM"):
-                atom_name = line[12:16].strip()
-                chain_id = line[21].strip()
-                residue_id = int(line[22:26])
-                x = float(line[30:38])
-                y = float(line[38:46])
-                z = float(line[46:54])
-
-                if atom_name == "CA":
-                    chain_coords[chain_id][residue_id] = np.array(
-                        [x, y, z]
-                    )
-
-    # Extract coordinates for the specified chains
+    for chain in model:
+        cid = chain.id
+        if cid not in (chain1, chain2):
+            continue
+        for residue in chain:
+            if "CA" in residue:
+                chain_coords[cid][residue.id[1]] = residue["CA"].get_coord()
+                
     chain_1_res = sorted(chain_coords[chain1].keys())
     chain_2_res = sorted(chain_coords[chain2].keys())
-
-    chain_1_coords = np.array(
-        [chain_coords[chain1][res] for res in chain_1_res]
-    )
-    chain_2_coords = np.array(
-        [chain_coords[chain2][res] for res in chain_2_res]
-    )
-
-    # Calculate pairwise Euclidean distance matrix
-    # Using broadcasting for efficiency: (N, 1, 3) - (1, M, 3) -> (N, M, 3)
-    dist = np.sqrt(
-        np.sum(
-            (chain_1_coords[:, None, :] - chain_2_coords[None, :, :]) ** 2,
-            axis=2,
-        )
-    )
+    if not chain_1_res or not chain_2_res:
+        return [], []
+    
+    chain_1_coords = np.array([chain_coords[chain1][res] for res in chain_1_res])
+    chain_2_coords = np.array([chain_coords[chain2][res] for res in chain_2_res])
+    
+    dist = np.sqrt(np.sum((chain_1_coords[:, None, :] - chain_2_coords[None, :, :]) ** 2, axis=2))
     interface_residues = np.where(dist < dist_cutoff)
-
-    interface_1 = sorted(
-        set(chain_1_res[i] for i in interface_residues[0])
-    )
-    interface_2 = sorted(
-        set(chain_2_res[i] for i in interface_residues[1])
-    )
-
+    
+    interface_1 = sorted(set(chain_1_res[i] for i in interface_residues[0]))
+    interface_2 = sorted(set(chain_2_res[i] for i in interface_residues[1]))
     return interface_1, interface_2
 
 
@@ -96,7 +76,11 @@ def extract_token_chain_and_res_ids(pdb_file):
     Extracts token-level chain IDs and residue IDs from a PDB file.
     Each token corresponds to one residue containing a CA atom.
     """
-    parser = PDBParser(QUIET=True)
+    if str(pdb_file).endswith('.cif'):
+        from Bio.PDB import MMCIFParser
+        parser = MMCIFParser(QUIET=True)
+    else:
+        parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", pdb_file)
     model = structure[0]
 
@@ -218,12 +202,14 @@ def process_single_description(args):
         summary_path = base_path / "summary_confidences.json"
         conf_path = base_path / "confidences.json"
         pdb_path = Path(input_pdb_dir) / f"{description}.pdb"
+        if not pdb_path.exists():
+            pdb_path = Path(input_pdb_dir) / f"{description}.cif"
 
         # Validate existence of required files
         if not summary_path.exists():
             return None, f"{description}: missing summary file"
         if not pdb_path.exists():
-            return None, f"{description}: missing pdb file"
+            return None, f"{description}: missing pdb/cif file"
         if not conf_path.exists():
             return None, f"{description}: missing conf file"
 
@@ -312,7 +298,7 @@ def extract_all_metrics_parallel(
         d for d in os.listdir(base_dir) if (Path(base_dir) / d).is_dir()
     ]
     args_list = [(d, input_pdb_dir, base_dir) for d in descriptions]
-    pdb_paths = sorted(glob.glob(f"{input_pdb_dir}/*.pdb"))
+    pdb_paths = sorted(glob.glob(f"{input_pdb_dir}/*.pdb") + glob.glob(f"{input_pdb_dir}/*.cif"))
 
     results = []
     failed = []

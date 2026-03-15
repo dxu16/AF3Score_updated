@@ -1,5 +1,4 @@
 #!/bin/bash
-#SBATCH -p gpu41,gpu43
 #SBATCH --gres=gpu:1
 #SBATCH -N 1
 #SBATCH -J af3score
@@ -27,8 +26,8 @@ buckets=$(basename "$batch_json_dir" | grep -oE '[0-9]+$')
 echo "Running on: $batch_json_dir  $batch_h5_dir  $buckets -> $output_dir" 
 
 $4 "$5/run_af3score.py"\
-  --db_dir=/lustre/grp/cmclab/share/wangd/af3_data \
-  --model_dir=/lustre/grp/cmclab/share/chenmc/Alphafold3params \
+  --db_dir=/scratch4/datasets/alphafold3 \
+  --model_dir=/scratch4/datasets/alphafold3_models \
   --batch_json_dir="$batch_json_dir" \
   --batch_h5_dir="$batch_h5_dir" \
   --output_dir="$output_dir" \
