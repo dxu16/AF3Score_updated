@@ -97,16 +97,55 @@ def get_chain_sequences_from_row(row):
             chain_sequences.append((chain_id, row[col]))
     return chain_sequences
 
+def get_chain_ligands_from_row(row):
+    """Extract all ligands from a dataframe row."""
+    chain_ligands = []
+    chain_columns = [
+        col
+        for col in row.index
+        if col.startswith("chain_") and col.endswith("_ligands")
+    ]
+    for col in chain_columns:
+        if pd.notna(row[col]) and str(row[col]).strip() != "":
+            chain_id = col.split("_")[1]
+            ligs = str(row[col]).split(',')
+            chain_ligands.append((chain_id, ligs))
+    return chain_ligands
+
 
 def get_sequence_from_chain(chain):
-    """Convert Biopython chain object to a single-letter amino acid sequence."""
+    """Convert Biopython chain object to a single-letter amino acid sequence, extract ligands and detect bonds between ligands."""
     sequence = ""
+    ligands = []
+    ligand_residues = []
+    
     for residue in chain:
-        # ' ' indicates a standard residue (not heteroatoms)
         if residue.id[0] == " ":
             resname = residue.get_resname().upper()
             sequence += protein_letters_3to1.get(resname, "X")
-    return sequence
+        else:
+            resname = residue.get_resname().upper()
+            if resname not in ["HOH", "WAT", "DOD"]:
+                ligands.append(resname)
+                ligand_residues.append(residue)
+                
+    # Detect bonds between ligands in the same chain (distance < 1.7A)
+    bonds = []
+    for i in range(len(ligand_residues)):
+        for j in range(i + 1, len(ligand_residues)):
+            res1 = ligand_residues[i]
+            res2 = ligand_residues[j]
+            for atom1 in res1:
+                for atom2 in res2:
+                    dist = atom1 - atom2
+                    if dist < 1.7:
+                        # AF3 JSON uses 1-based indices for residues in the ligand sequence
+                        bonds.append([
+                            [chain.id, i + 1, atom1.get_name()],
+                            [chain.id, j + 1, atom2.get_name()]
+                        ])
+                        
+    return sequence, ligands, bonds
 
 
 def process_single_pdb(args):
@@ -125,30 +164,40 @@ def process_single_pdb(args):
         base_name = os.path.splitext(os.path.basename(input_pdb))[0]
 
         chain_sequences = {}
+        chain_ligands = {}
+        chain_bonds = []
         merged_sequence = ""
 
         # Iterate through the first model (index 0) of the PDB
         for chain in structure[0]:
             chain_id = chain.id
-            sequence = get_sequence_from_chain(chain)
-            chain_sequences[chain_id] = sequence
+            sequence, ligands, bonds = get_sequence_from_chain(chain)
+            
+            if sequence:
+                chain_sequences[chain_id] = sequence
+            if ligands:
+                chain_ligands[chain_id] = ligands
+            if bonds:
+                chain_bonds.extend(bonds)
+                
             merged_sequence += sequence
 
-            # Create a new structure object containing only this specific chain
-            new_structure = Structure.Structure("new_structure")
-            new_model = Model.Model(0)
-            new_structure.add(new_model)
-            new_model.add(chain.copy())
+            if sequence:
+                # Create a new structure object containing only this specific chain
+                new_structure = Structure.Structure("new_structure")
+                new_model = Model.Model(0)
+                new_structure.add(new_model)
+                new_model.add(chain.copy())
+    
+                # Save as MMCIF format
+                cif_io = MMCIFIO()
+                cif_io.set_structure(new_structure)
+                cif_output = os.path.join(
+                    output_dir_cif, f"{base_name}_chain_{chain_id}.cif"
+                )
+                cif_io.save(cif_output)
 
-            # Save as MMCIF format
-            cif_io = MMCIFIO()
-            cif_io.set_structure(new_structure)
-            cif_output = os.path.join(
-                output_dir_cif, f"{base_name}_chain_{chain_id}.cif"
-            )
-            cif_io.save(cif_output)
-
-        return base_name, chain_sequences, len(merged_sequence)
+        return base_name, {"sequences": chain_sequences, "ligands": chain_ligands, "bonds": chain_bonds}, len(merged_sequence)
 
     except Exception as e:
         print(f"Error processing {input_pdb}: {str(e)}")
@@ -160,12 +209,15 @@ def generate_json_files(tasks):
     row, cif_dir, output_dir = tasks
     complex_name = row["complex"]
     chain_sequences = get_chain_sequences_from_row(row)
+    chain_ligands = get_chain_ligands_from_row(row)
 
-    if not chain_sequences:
-        print(f"⚠️ Warning: No valid chain sequences for {complex_name}")
+    if not chain_sequences and not chain_ligands:
+        print(f"⚠️ Warning: No valid chain sequences or ligands for {complex_name}")
         return None
 
     sequences = []
+    
+    # Process proteins
     for chain_id, sequence in chain_sequences:
         cif_filename = f"{complex_name}_chain_{chain_id}.cif"
         cif_path = os.path.join(cif_dir, cif_filename)
@@ -193,6 +245,40 @@ def generate_json_files(tasks):
                 }
             }
         )
+        
+    # Process ligands
+    for chain_id, ccdCodes in chain_ligands:
+        safe_id = chain_id
+        if any(c == chain_id for c, _ in chain_sequences):
+            safe_id = chain_id + "_lig"
+            
+        sequences.append(
+            {
+                "ligand": {
+                    "id": safe_id,
+                    "ccdCodes": ccdCodes,
+                }
+            }
+        )
+
+    bonds = []
+    if "bonds" in row and pd.notna(row["bonds"]):
+        try:
+            bonds_data = json.loads(row["bonds"])
+            # Format bonds correctly for AF3 parser: (chain_id, res_id, atom_name)
+            for b in bonds_data:
+                # bonds_data is a list of [ [chain.id, res1_idx, atom1_name], [chain.id, res2_idx, atom2_name] ]
+                # If we mutated the chain id to safe_id (e.g. X_lig), we must update it
+                for atom_end in b:
+                    chain_id = atom_end[0]
+                    safe_id = chain_id
+                    if any(c == chain_id for c, _ in chain_sequences):
+                        safe_id = chain_id + "_lig"
+                    atom_end[0] = safe_id
+                
+                bonds.append(b)
+        except:
+            pass
 
     if not sequences:
         print(f"⚠️ Warning: No valid sequence data for {complex_name}")
@@ -204,7 +290,7 @@ def generate_json_files(tasks):
         "name": complex_name,
         "sequences": sequences,
         "modelSeeds": [10],
-        "bondedAtomPairs": None,
+        "bondedAtomPairs": bonds if bonds else None,
         "userCCD": None,
     }
 
@@ -265,11 +351,13 @@ def get_seq_main():
             )
         )
 
-    # Consolidate results into sequence metadata
-    for base_name, chain_sequences, length in results:
+                # Consolidate results into sequence metadata
+    for base_name, parsed_data, length in results:
         if base_name is not None:
             sequences_dict[base_name] = {
-                "sequences": chain_sequences,
+                "sequences": parsed_data["sequences"],
+                "ligands": parsed_data["ligands"],
+                "bonds": parsed_data.get("bonds", []),
                 "length": length,
             }
 
@@ -277,6 +365,7 @@ def get_seq_main():
     all_chain_ids = set()
     for entry in sequences_dict.values():
         all_chain_ids.update(entry["sequences"].keys())
+        all_chain_ids.update(entry["ligands"].keys())
 
     def chain_sort_key(chain_id):
         return str(chain_id)
@@ -286,10 +375,12 @@ def get_seq_main():
     # Prepare DataFrame rows
     rows = []
     for complex_name, entry in sequences_dict.items():
-        chain_data = entry["sequences"]
-        row = {"complex": complex_name, "total_length": entry["length"]}
+        chain_seq_data = entry["sequences"]
+        chain_lig_data = entry["ligands"]
+        row = {"complex": complex_name, "total_length": entry["length"], "bonds": json.dumps(entry["bonds"])}
         for chain_id in all_chain_ids:
-            row[f"chain_{chain_id}_seq"] = chain_data.get(chain_id, "")
+            row[f"chain_{chain_id}_seq"] = chain_seq_data.get(chain_id, "")
+            row[f"chain_{chain_id}_ligands"] = ",".join(chain_lig_data.get(chain_id, []))
         rows.append(row)
 
     df = pd.DataFrame(rows)
